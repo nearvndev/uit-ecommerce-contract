@@ -39,6 +39,8 @@ pub trait ExtEcommerceContract {
  * Bài tập về nhà: Cho phép owner trả tiền lại cho user khi user muốn trả hàng
  */
 
+ // this is the new line :V
+
 #[near_bindgen]
 impl EcommerceContract {
     #[init]
