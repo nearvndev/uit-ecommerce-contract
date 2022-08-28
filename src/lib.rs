@@ -6,6 +6,8 @@ use near_sdk::collections::{LookupMap};
 
 mod order;
 use order::*;
+mod ft_contract;
+use ft_contract::*;
 
 pub type OrderId = String;
 pub const TRANSFER_GAS: Gas = Gas(10_000_000_000_000); //
@@ -14,6 +16,7 @@ pub const TRANSFER_GAS: Gas = Gas(10_000_000_000_000); //
 #[near_bindgen]
 struct EcommerceContract {
     pub owner_id: AccountId,
+    pub ft_contract_id: AccountId,
     pub orders: LookupMap<OrderId, Order>
 }
 
@@ -39,9 +42,10 @@ pub trait ExtEcommerceContract {
 #[near_bindgen]
 impl EcommerceContract {
     #[init]
-    pub fn new(owner_id: AccountId) -> Self {
+    pub fn new(owner_id: AccountId, ft_contract_id: AccountId) -> Self {
         Self { 
             owner_id, 
+            ft_contract_id,
             orders: LookupMap::new(StorageKey::OrderKey)
         }
     }
@@ -51,10 +55,20 @@ impl EcommerceContract {
         // Lay thong tin so NEAR deposit cua user env::attached_deposit()
         assert!(env::attached_deposit() >= order_amount.0, "ERROR_DEPOSIT_NOT_ENOUGH");
 
+        // Kiem tra xem don hang da thanh toan chua
+        let order_optional = self.orders.get(&order_id);
+        match order_optional {
+            Some(order) => {
+                assert!(!order.is_completed)
+            }
+            None => {}
+        }
+
         // Luu tru lai thong tin thanh toan cua user
         let order: Order = Order { 
             order_id: order_id.clone(), 
             payer_id: env::signer_account_id(), 
+            payment_method: PaymentMethod::Near,
             amount: order_amount.0, 
             received_amount: env::attached_deposit(), 
             is_completed: true, 
@@ -90,19 +104,39 @@ impl EcommerceContract {
         let mut order = self.orders.get(&order_id).expect("ERROR_NOT_FOUND_ORDER");
         assert!(order.is_completed && !order.is_refund);
 
+        order.is_refund = true;
+
         self.orders.insert(&order_id, &order);
 
         if order.amount > 0 {
             // Cross contract call
-            let promise = Promise::new(order.payer_id)
-                .transfer(order.amount)
-                .then(
-                    ext_self::ext(env::current_account_id())
-                        .with_attached_deposit(0)
+            match order.payment_method {
+                PaymentMethod::Near => {
+                    let promise = Promise::new(order.payer_id)
+                        .transfer(order.amount)
+                        .then(
+                            ext_self::ext(env::current_account_id())
+                                .with_attached_deposit(0)
+                                .with_static_gas(TRANSFER_GAS)
+                                .transfer_callback(order_id)
+                        );
+                    PromiseOrValue::Promise(promise)
+                }
+                PaymentMethod::FungibleToken => {
+                    let promise = ext_ft::ext(self.ft_contract_id.clone())
+                        .with_attached_deposit(1)
                         .with_static_gas(TRANSFER_GAS)
-                        .transfer_callback(order_id)
-                );
-            PromiseOrValue::Promise(promise)
+                        .ft_transfer(order.payer_id, U128(order.amount), Some("Refund order from payment contract".to_owned()))
+                        .then(
+                            ext_self::ext(env::current_account_id())
+                            .with_attached_deposit(0)
+                            .with_static_gas(TRANSFER_GAS)
+                            .transfer_callback(order_id)
+                        );
+                    PromiseOrValue::Promise(promise)
+
+                }
+            }
         } else {
             PromiseOrValue::Value(U128(0))
         }
