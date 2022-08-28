@@ -1,13 +1,14 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, AccountId, near_bindgen, Balance, PanicOnDefault, BorshStorageKey, Promise, PromiseOrValue};
+use near_sdk::{env, AccountId, near_bindgen, Balance, PanicOnDefault, BorshStorageKey, Promise, PromiseOrValue, ext_contract, PromiseResult, Gas};
 use near_sdk::collections::{LookupMap};
 
 mod order;
 use order::*;
 
 pub type OrderId = String;
+pub const TRANSFER_GAS: Gas = Gas(10_000_000_000_000); //
 
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 #[near_bindgen]
@@ -19,6 +20,11 @@ struct EcommerceContract {
 #[derive(BorshDeserialize, BorshSerialize, BorshStorageKey)]
 enum StorageKey {
     OrderKey
+}
+
+#[ext_contract(ext_self)]
+pub trait ExtEcommerceContract {
+    fn transfer_callback(&mut self, order_id: OrderId) -> PromiseOrValue<U128>;
 }
 
 /**
@@ -67,8 +73,64 @@ impl EcommerceContract {
         }
     }
 
+    // Trả lại data cho user thông quan DTOs - Data transfer object
     pub fn get_order(&self, order_id: OrderId) -> Order {
         self.orders.get(&order_id).expect("NOT_FOUND_ORDER_ID")
+    }
+
+    // Refund lại tiền cho user
+    /**
+     * - Kiểm tra xem ng gọi có phải là owner của contract không?
+     * - Kiểm xem đơn hàng đã complete và refund chưa?
+     * - Thực hiện việc cập nhật trạng thái đơn
+     * - Thực hiện trả tiền cho user
+     */
+    pub fn refund(&mut self, order_id: OrderId) -> PromiseOrValue<U128> {
+        assert_eq!(env::predecessor_account_id(), self.owner_id);
+        let mut order = self.orders.get(&order_id).expect("ERROR_NOT_FOUND_ORDER");
+        assert!(order.is_completed && !order.is_refund);
+
+        self.orders.insert(&order_id, &order);
+
+        if order.amount > 0 {
+            // Cross contract call
+            let promise = Promise::new(order.payer_id)
+                .transfer(order.amount)
+                .then(
+                    ext_self::ext(env::current_account_id())
+                        .with_attached_deposit(0)
+                        .with_static_gas(TRANSFER_GAS)
+                        .transfer_callback(order_id)
+                );
+            PromiseOrValue::Promise(promise)
+        } else {
+            PromiseOrValue::Value(U128(0))
+        }
+
+    }
+
+}
+
+#[near_bindgen]
+impl ExtEcommerceContract for EcommerceContract {
+    #[private]
+    fn transfer_callback(&mut self, order_id: OrderId) -> PromiseOrValue<U128> {
+        assert_eq!(env::promise_results_count(), 1, "ERROR_TOO_MANY_RESULTS");
+        match env::promise_result(0) {
+            PromiseResult::NotReady => unreachable!(),
+            PromiseResult::Successful(_value) => {
+                PromiseOrValue::Value(U128(0))
+            },
+            PromiseResult::Failed => {
+                // Cap nhat lai trang thai refund
+                let mut order = self.orders.get(&order_id).expect("ERROR_ORDER_NOT_FOUND");
+                order.is_refund = false;
+
+                self.orders.insert(&order_id, &order);
+
+                PromiseOrValue::Value(U128(order.amount))
+            }
+        }
     }
 }
 
