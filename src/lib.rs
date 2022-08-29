@@ -41,6 +41,7 @@ pub trait ExtEcommerceContract {
 
  // this is the new line :V
  // this is the new to merge
+// this is for branch new-test, will push to local.
 
 #[near_bindgen]
 impl EcommerceContract {
